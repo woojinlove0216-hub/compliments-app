@@ -7,7 +7,7 @@ from flask import Flask, request, jsonify, render_template_string
 app = Flask(__name__)
 
 DATA_FILE = "compliments.json"
-ADMIN_KEY = "1234!"
+ADMIN_KEY = "2026!"
 
 def load_data():
     if not os.path.exists(DATA_FILE):
@@ -142,7 +142,7 @@ HTML_CODE = """
       return `
         <div class="post">
           <div class="header">
-            <span class="tag ${isRecv ? 'tag-recv' : 'tag-sent'}">${isRecv ? 'To. 나 (익명 친구)' : '내가 보낸 칭찬 (To. ' + item.receiver + ')'}</span>
+            <span class="tag isRecv?'tag-recv':'tag-sent'">{isRecv ? 'To. 나 (익명 친구)' : '내가 보낸 칭찬 (To. ' + item.receiver + ')'}</span>
             <span>${item.date}</span>
           </div>
           <div>${item.content}</div>
@@ -151,7 +151,7 @@ HTML_CODE = """
     }).join('');
   }
 
-  // 3. 관리자 전체 열람 (코드: 1234!)
+  // 3. 관리자 전체 열람 (코드: 2026!)
   async function adminLogin() {
     const code = document.getElementById('admKey').value.trim();
     const res = await fetch(`/api/admin?code=${encodeURIComponent(code)}`);
@@ -180,7 +180,7 @@ HTML_CODE = """
 
   async function del(id) {
     if (!confirm("삭제하시겠습니까?")) return;
-    const res = await fetch(`/api/delete?id=${id}&code=${encodeURIComponent(currentAdminKey)}`, { method: 'DELETE' });
+    const res = await fetch(`/api/delete?id=id&code={encodeURIComponent(currentAdminKey)}`, { method: 'DELETE' });
     const data = await res.json();
     renderAdmin(data.list);
   }
@@ -234,3 +234,4 @@ def admin_delete():
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
+
