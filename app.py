@@ -11,7 +11,7 @@ app = Flask(__name__)
 # Render의 인스턴스 파일에 저장합니다.
 # 무료 호스팅 환경에서는 재배포 시 파일이 초기화될 수 있습니다.
 DATA_FILE = os.path.join(os.path.dirname(__file__), "compliments.json")
-ADMIN_KEY = "1234!"
+ADMIN_KEY = "2026!"
 
 # 관리자 로그인 실패 제한
 admin_failures = 0
