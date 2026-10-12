@@ -1,237 +1,353 @@
 import os
 import json
 import time
+import html
 from datetime import datetime
+from threading import Lock
 from flask import Flask, request, jsonify, render_template_string
 
 app = Flask(__name__)
 
-DATA_FILE = "compliments.json"
-ADMIN_KEY = "2026!"
+# Render의 인스턴스 파일에 저장합니다.
+# 무료 호스팅 환경에서는 재배포 시 파일이 초기화될 수 있습니다.
+DATA_FILE = os.path.join(os.path.dirname(__file__), "compliments.json")
+ADMIN_KEY = "1234!"
+
+# 관리자 로그인 실패 제한
+admin_failures = 0
+admin_locked_until = 0.0
+admin_lock = Lock()
 
 def load_data():
-    if not os.path.exists(DATA_FILE):
-        return []
     try:
         with open(DATA_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
+            data = json.load(f)
+            return data if isinstance(data, list) else []
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
         return []
 
-def save_data(data):
-    with open(DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+def save_data(items):
+    temp_file = DATA_FILE + ".tmp"
+    with open(temp_file, "w", encoding="utf-8") as f:
+        json.dump(items, f, ensure_ascii=False, indent=2)
+    os.replace(temp_file, DATA_FILE)
 
-HTML_CODE = """
+def safe_text(value, max_length):
+    if not isinstance(value, str):
+        return ""
+    return value.strip()[:max_length]
+
+HTML_CODE = r"""
 <!DOCTYPE html>
 <html lang="ko">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>비밀 익명 칭찬 우체통</title>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>익명 칭찬 우체통</title>
   <style>
-    body { font-family: sans-serif; background: #f8fafc; color: #1e293b; padding: 16px; margin: 0; display: flex; justify-content: center; }
-    .container { width: 100%; max-width: 500px; }
-    h1 { text-align: center; font-size: 1.4rem; margin-bottom: 20px; }
-    .card { background: white; padding: 16px; border-radius: 10px; border: 1px solid #cbd5e1; margin-bottom: 14px; box-shadow: 0 2px 4px rgba(0,0,0,0.02); }
-    input, textarea, button { width: 100%; padding: 10px; margin-top: 6px; border: 1px solid #cbd5e1; border-radius: 6px; box-sizing: border-box; font-size: 0.95rem; }
-    button { background: #4f46e5; color: white; border: none; font-weight: bold; cursor: pointer; margin-top: 10px; }
-    .btn-sub { background: #64748b; }
-    .btn-del { background: #ef4444; width: auto; padding: 4px 8px; font-size: 0.8rem; margin: 0; }
-    .row { display: flex; gap: 8px; }
-    .post { background: #f1f5f9; padding: 12px; border-radius: 8px; margin-bottom: 10px; }
-    .header { font-size: 0.85rem; color: #64748b; display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
-    .tag { font-weight: bold; padding: 2px 6px; border-radius: 4px; font-size: 0.75rem; }
-    .tag-recv { background: #dcfce7; color: #15803d; }
-    .tag-sent { background: #e0e7ff; color: #4338ca; }
-    .tag-adm { background: #fee2e2; color: #b91c1c; }
-    #qrcode { display: flex; justify-content: center; margin-top: 10px; }
+    * { box-sizing: border-box; }
+    body { margin: 0; padding: 16px; background: #f8fafc; color: #1e293b;
+           font-family: Arial, sans-serif; }
+    main { max-width: 520px; margin: auto; }
+    h1 { text-align: center; font-size: 1.5rem; }
+    section { background: white; padding: 16px; margin: 14px 0;
+              border: 1px solid #dbe2ea; border-radius: 12px; }
+    input, textarea, button { width: 100%; padding: 11px; margin-top: 8px;
+              border: 1px solid #cbd5e1; border-radius: 7px; font-size: 1rem; }
+    textarea { min-height: 90px; resize: vertical; }
+    button { color: white; background: #4f46e5; border: 0; font-weight: bold; cursor: pointer; }
+    button:disabled { opacity: .6; cursor: wait; }
+    .row { display: flex; gap: 8px; align-items: center; }
+    .row input { min-width: 0; }
+    .row button { width: auto; flex: 0 0 90px; }
+    .secondary { background: #475569; }
+    .post { padding: 12px; margin-top: 10px; border-radius: 8px; background: #f1f5f9; }
+    .meta { display: flex; justify-content: space-between; gap: 8px;
+            margin-bottom: 7px; color: #64748b; font-size: .85rem; }
+    .content { white-space: pre-wrap; overflow-wrap: anywhere; }
+    .received { color: #166534; }
+    .sent { color: #3730a3; }
+    .admin { color: #991b1b; }
+    .delete { width: auto; padding: 5px 9px; margin: 0; background: #dc2626; }
+    #message { min-height: 1.3em; color: #475569; }
   </style>
 </head>
 <body>
-<div class="container">
-  <h1>💌 비밀 익명 칭찬 우체통</h1>
+<main>
+  <h1>💌 익명 칭찬 우체통</h1>
 
-  <div class="card">
-    <b>📱 24시간 친구 접속 QR코드</b>
-    <div id="qrcode"></div>
-  </div>
+  <section>
+    <h2>칭찬 남기기</h2>
+    <input id="sender" maxlength="40" placeholder="보내는 사람 이름">
+    <input id="receiver" maxlength="40" placeholder="받는 사람 이름">
+    <textarea id="content" maxlength="1000" placeholder="칭찬 내용을 적어주세요"></textarea>
+    <button id="sendButton" type="button">익명으로 보내기</button>
+  </section>
 
-  <div class="card">
-    <b>✍️ 칭찬 남기기 (익명 전달)</b>
+  <section>
+    <h2>내 칭찬 확인</h2>
     <div class="row">
-      <input type="text" id="sender" placeholder="내 이름 (작성자)">
-      <input type="text" id="receiver" placeholder="받을 친구 이름">
+      <input id="lookupName" maxlength="40" placeholder="이름 입력">
+      <button id="lookupButton" type="button">조회</button>
     </div>
-    <textarea id="content" placeholder="따뜻한 칭찬의 한마디를 적어주세요."></textarea>
-    <button id="sendBtn" onclick="send()">보내기</button>
-  </div>
+  </section>
 
-  <div class="card">
-    <b>🔍 내 칭찬함 열기</b>
+  <section>
+    <h2>관리자</h2>
     <div class="row">
-      <input type="text" id="myname" placeholder="확인할 내 이름 입력">
-      <button onclick="search()" style="width: 100px; margin-top: 6px;">조회</button>
+      <input id="adminCode" type="password" placeholder="관리자 코드">
+      <button id="adminButton" class="secondary" type="button">전체 보기</button>
     </div>
-  </div>
+    <p id="message" aria-live="polite"></p>
+  </section>
 
-  <div class="card">
-    <b>🛡️ 관리자 모드</b>
-    <div class="row">
-      <input type="password" id="admKey" placeholder="관리자 코드">
-      <button class="btn-sub" onclick="adminLogin()" style="width: 100px; margin-top: 6px;">열람</button>
-    </div>
-  </div>
-
-  <div class="card">
-    <b id="title">칭찬 목록</b>
-    <div id="list" style="margin-top: 10px; color: #94a3b8; font-size: 0.9rem;">이름을 입력하고 조회하세요.</div>
-  </div>
-</div>
+  <section>
+    <h2 id="listTitle">칭찬 목록</h2>
+    <div id="list">이름을 입력하고 조회하세요.</div>
+  </section>
+</main>
 
 <script>
-  let currentAdminKey = "";
+let adminCodeForDelete = "";
 
-  new QRCode(document.getElementById('qrcode'), {
-    text: window.location.href,
-    width: 140,
-    height: 140
-  });
+function escapeHtml(value) {
+  return String(value ?? "").replace(/[&<>"']/g, ch => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+  })[ch]);
+}
 
-  // 1. 보내기
-  async function send() {
-    const sender = document.getElementById('sender').value.trim();
-    const receiver = document.getElementById('receiver').value.trim();
-    const content = document.getElementById('content').value.trim();
-    if (!sender || !receiver || !content) return alert("모든 항목을 입력해주세요.");
+async function api(url, options = {}) {
+  const response = await fetch(url, options);
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const error = new Error(result.message || `요청 실패 (${response.status})`);
+    error.status = response.status;
+    throw error;
+  }
+  return result;
+}
 
-    const btn = document.getElementById('sendBtn');
-    btn.disabled = true;
-    btn.textContent = "전송 중...";
+function showPosts(posts, name) {
+  const box = document.getElementById("list");
+  if (!posts.length) {
+    box.textContent = "관련된 칭찬이 없습니다.";
+    return;
+  }
 
-    const res = await fetch('/api/send', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+  box.innerHTML = posts.map(post => {
+    const received = name && post.receiver === name;
+    const label = name
+      ? (received ? "To. 나 (익명)" : `내가 보냄 · To. ${escapeHtml(post.receiver)}`)
+      : `${escapeHtml(post.sender)} → ${escapeHtml(post.receiver)}`;
+
+    return `<article class="post">
+      <div class="meta">
+        <span class="${name ? (received ? "received" : "sent") : "admin"}">${label}</span>
+        <span>${escapeHtml(post.date)}</span>
+      </div>
+      <div class="content">${escapeHtml(post.content)}</div>
+    </article>`;
+  }).join("");
+}
+
+async function sendCompliment() {
+  const sender = document.getElementById("sender").value.trim();
+  const receiver = document.getElementById("receiver").value.trim();
+  const content = document.getElementById("content").value.trim();
+  const button = document.getElementById("sendButton");
+
+  if (!sender || !receiver || !content) {
+    alert("보내는 사람, 받는 사람, 칭찬 내용을 모두 입력해주세요.");
+    return;
+  }
+
+  button.disabled = true;
+  button.textContent = "보내는 중...";
+  try {
+    await api("/api/send", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ sender, receiver, content })
     });
-    const data = await res.json();
-    btn.disabled = false;
-    btn.textContent = "보내기";
+    alert("칭찬을 보냈습니다.");
+    document.getElementById("content").value = "";
+  } catch (error) {
+    alert("전송 실패: " + error.message);
+  } finally {
+    button.disabled = false;
+    button.textContent = "익명으로 보내기";
+  }
+}
 
-    if (data.success) {
-      alert(`${receiver} 친구에게 칭찬을 전달했습니다!`);
-      document.getElementById('content').value = "";
-    }
+async function lookupCompliments() {
+  const name = document.getElementById("lookupName").value.trim();
+  if (!name) {
+    alert("이름을 입력해주세요.");
+    return;
   }
 
-  // 2. 조회 (보낸 사람 & 받는 사람 둘 다 확인)
-  async function search() {
-    const name = document.getElementById('myname').value.trim();
-    if (!name) return alert("이름을 입력하세요.");
-
-    const res = await fetch(`/api/search?name=${encodeURIComponent(name)}`);
-    const list = await res.json();
-
-    document.getElementById('title').textContent = `💬 ${name}님의 칭찬 목록`;
-    const box = document.getElementById('list');
-    if (list.length === 0) return box.innerHTML = "도착하거나 보낸 칭찬이 없습니다.";
-
-    box.innerHTML = list.map(item => {
-      const isRecv = item.receiver === name;
-      return `
-        <div class="post">
-          <div class="header">
-            <span class="tag isRecv?'tag-recv':'tag-sent'">{isRecv ? 'To. 나 (익명 친구)' : '내가 보낸 칭찬 (To. ' + item.receiver + ')'}</span>
-            <span>${item.date}</span>
-          </div>
-          <div>${item.content}</div>
-        </div>
-      `;
-    }).join('');
+  document.getElementById("listTitle").textContent = `${name}님의 칭찬`;
+  document.getElementById("list").textContent = "불러오는 중...";
+  try {
+    const posts = await api(`/api/search?name=${encodeURIComponent(name)}`);
+    showPosts(posts, name);
+  } catch (error) {
+    document.getElementById("list").textContent = "조회 실패: " + error.message;
   }
+}
 
-  // 3. 관리자 전체 열람 (코드: 2026!)
-  async function adminLogin() {
-    const code = document.getElementById('admKey').value.trim();
-    const res = await fetch(`/api/admin?code=${encodeURIComponent(code)}`);
-    const data = await res.json();
-    if (!data.success) return alert("관리자 코드가 일치하지 않습니다.");
+async function adminLogin() {
+  const code = document.getElementById("adminCode").value;
+  const message = document.getElementById("message");
+  message.textContent = "";
 
-    currentAdminKey = code;
-    document.getElementById('title').textContent = "🛡️ 관리자 전체 열람";
-    renderAdmin(data.list);
+  try {
+    const result = await api(`/api/admin?code=${encodeURIComponent(code)}`);
+    adminCodeForDelete = code;
+    document.getElementById("listTitle").textContent = "관리자 전체 목록";
+    showPosts(result.list, "");
+    renderDeleteButtons(result.list);
+  } catch (error) {
+    message.textContent = error.message;
   }
+}
 
-  function renderAdmin(list) {
-    const box = document.getElementById('list');
-    if (list.length === 0) return box.innerHTML = "등록된 글이 없습니다.";
+function renderDeleteButtons(posts) {
+  const box = document.getElementById("list");
+  if (!posts.length) return;
 
-    box.innerHTML = list.map(item => `
-      <div class="post">
-        <div class="header">
-          <span class="tag tag-adm">${item.sender} ➔ ${item.receiver}</span>
-          <button class="btn-del" onclick="del(${item.id})">삭제</button>
-        </div>
-        <div>${item.content}</div>
+  box.innerHTML = posts.map(post => `
+    <article class="post">
+      <div class="meta">
+        <span>${escapeHtml(post.sender)} → ${escapeHtml(post.receiver)}</span>
+        <button class="delete" type="button" data-id="${post.id}">삭제</button>
       </div>
-    `).join('');
-  }
+      <div class="content">${escapeHtml(post.content)}</div>
+      <div class="meta">${escapeHtml(post.date)}</div>
+    </article>`).join("");
 
-  async function del(id) {
-    if (!confirm("삭제하시겠습니까?")) return;
-    const res = await fetch(`/api/delete?id=id&code={encodeURIComponent(currentAdminKey)}`, { method: 'DELETE' });
-    const data = await res.json();
-    renderAdmin(data.list);
+  box.querySelectorAll(".delete").forEach(button => {
+    button.addEventListener("click", () => deletePost(button.dataset.id));
+  });
+}
+
+async function deletePost(id) {
+  if (!confirm("이 칭찬을 삭제할까요?")) return;
+  try {
+    const result = await api(
+      `/api/delete?id=${encodeURIComponent(id)}&code=${encodeURIComponent(adminCodeForDelete)}`,
+      { method: "DELETE" }
+    );
+    renderDeleteButtons(result.list);
+  } catch (error) {
+    alert("삭제 실패: " + error.message);
   }
+}
+
+document.getElementById("sendButton").addEventListener("click", sendCompliment);
+document.getElementById("lookupButton").addEventListener("click", lookupCompliments);
+document.getElementById("adminButton").addEventListener("click", adminLogin);
 </script>
 </body>
 </html>
 """
 
-@app.route('/')
+@app.get("/")
 def index():
     return render_template_string(HTML_CODE)
 
-@app.route('/api/send', methods=['POST'])
+@app.post("/api/send")
 def send_compliment():
-    data = request.json
-    compliments = load_data()
+    data = request.get_json(silent=True) or {}
+    sender = safe_text(data.get("sender"), 40)
+    receiver = safe_text(data.get("receiver"), 40)
+    content = safe_text(data.get("content"), 1000)
+
+    if not sender or not receiver or not content:
+        return jsonify({"message": "모든 항목을 입력해주세요."}), 400
+
+    posts = load_data()
     now = datetime.now()
-    new_item = {
-        'id': int(time.time() * 1000),
-        'sender': data['sender'],
-        'receiver': data['receiver'],
-        'content': data['content'],
-        'date': f"{now.month}/{now.day} {now.hour:02d}:{now.minute:02d}"
-    }
-    compliments.insert(0, new_item)
-    save_data(compliments)
-    return jsonify({'success': True})
+    posts.insert(0, {
+        "id": str(time.time_ns()),
+        "sender": sender,
+        "receiver": receiver,
+        "content": content,
+        "date": now.strftime("%Y-%m-%d %H:%M")
+    })
 
-@app.route('/api/search')
-def search_compliment():
-    name = request.args.get('name', '').strip()
-    compliments = load_data()
-    my_posts = [c for c in compliments if c['receiver'] == name or c['sender'] == name]
-    return jsonify(my_posts)
+    try:
+        save_data(posts)
+    except OSError:
+        return jsonify({"message": "서버에 저장하지 못했습니다."}), 500
 
-@app.route('/api/admin')
-def admin_view():
-    if request.args.get('code') != ADMIN_KEY:
-        return jsonify({'success': False})
-    return jsonify({'success': True, 'list': load_data()})
+    return jsonify({"success": True})
 
-@app.route('/api/delete', methods=['DELETE'])
-def admin_delete():
-    if request.args.get('code') != ADMIN_KEY:
-        return jsonify({'success': False})
-    compliments = load_data()
-    post_id = int(request.args.get('id'))
-    compliments = [c for c in compliments if c['id'] != post_id]
-    save_data(compliments)
-    return jsonify({'success': True, 'list': compliments})
+@app.get("/api/search")
+def search_compliments():
+    name = safe_text(request.args.get("name", ""), 40)
+    if not name:
+        return jsonify([])
 
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)
+    # 이름만 입력하는 방식은 본인 인증이 아닙니다.
+    posts = load_data()
+    return jsonify([
+        post for post in posts
+        if post.get("sender") == name or post.get("receiver") == name
+    ])
 
+@app.get("/api/admin")
+def admin_list():
+    global admin_failures, admin_locked_until
+
+    now = time.time()
+    with admin_lock:
+        remaining = int(admin_locked_until - now + 0.999)
+        if remaining > 0:
+            return jsonify({
+                "message": f"로그인이 잠겼습니다. {remaining}초 후 다시 시도하세요."
+            }), 429
+
+        code = request.args.get("code", "")
+        if code != ADMIN_KEY:
+            admin_failures += 1
+
+            if admin_failures >= 3:
+                lock_seconds = 30 + (admin_failures - 3) * 5
+                admin_locked_until = now + lock_seconds
+                return jsonify({
+                    "message": f"코드가 틀렸습니다. {lock_seconds}초 동안 잠깁니다."
+                }), 401
+
+            return jsonify({
+                "message": f"코드가 틀렸습니다. {3 - admin_failures}회 더 실패하면 잠깁니다."
+            }), 401
+
+        admin_failures = 0
+        admin_locked_until = 0.0
+
+    return jsonify({"success": True, "list": load_data()})
+
+@app.delete("/api/delete")
+def delete_compliment():
+    global admin_failures, admin_locked_until
+
+    now = time.time()
+    with admin_lock:
+        if now < admin_locked_until:
+            remaining = int(admin_locked_until - now + 0.999)
+            return jsonify({"message": f"{remaining}초 후 다시 시도하세요."}), 429
+
+        if request.args.get("code", "") != ADMIN_KEY:
+            return jsonify({"message": "관리자 인증이 필요합니다."}), 403
+
+    post_id = request.args.get("id", "")
+    posts = load_data()
+    updated = [post for post in posts if post.get("id") != post_id]
+
+    try:
+        save_data(updated)
+    except OSError:
+        return jsonify({"message": "삭제를 저장하지 못했습니다."}), 500
+
+    return jsonify({"success": True, "list": updated})
